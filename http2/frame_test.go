@@ -6,6 +6,7 @@ package http2
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -1587,6 +1588,77 @@ func TestReadFrameForHeaderUnexpectedEOF(t *testing.T) {
 	if err != io.ErrUnexpectedEOF {
 		t.Fatalf("ReadFrameForHeader with short body = %v; want io.ErrUnexpectedEOF", err)
 	}
+}
+
+// Reader-originated StreamError must not surface as a bare StreamError from
+// ReadFrame: the read loop in transport.go treats a bare StreamError as
+// recoverable and keeps reading, spinning the CPU when the error is sticky
+// (golang/go#80567, CL 807440 port).
+func TestFramerWrapsReaderStreamError(t *testing.T) {
+	streamErr := StreamError{StreamID: 1, Code: ErrCodeInternal}
+	frameHeader := []byte{
+		0, 0, 1, // payload length
+		byte(FrameData),
+		0,          // flags
+		0, 0, 0, 1, // stream ID
+	}
+	tests := []struct {
+		name string
+		r    io.Reader
+	}{
+		{
+			name: "header",
+			r:    returningErrorReader{streamErr},
+		},
+		{
+			name: "payload",
+			r:    io.MultiReader(bytes.NewReader(frameHeader), returningErrorReader{streamErr}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewFramer(nil, tt.r).ReadFrame()
+			if _, ok := err.(StreamError); ok {
+				t.Fatalf("ReadFrame error has type StreamError; want wrapped error")
+			}
+			var got StreamError
+			if !errors.As(err, &got) {
+				t.Fatalf("ReadFrame error = %T %v; want error wrapping StreamError", err, err)
+			}
+			if got != streamErr {
+				t.Fatalf("ReadFrame error wraps %v; want %v", got, streamErr)
+			}
+			if !terminalReadFrameError(err) {
+				t.Fatalf("terminalReadFrameError(%v) = false; want true", err)
+			}
+		})
+	}
+}
+
+// A locally parsed StreamError (from the Framer itself) must stay recoverable.
+func TestFramerLeavesParsedStreamErrorUnwrapped(t *testing.T) {
+	frame := []byte{
+		0, 0, 4, // payload length
+		byte(FrameWindowUpdate),
+		0,          // flags
+		0, 0, 0, 1, // stream ID
+		0, 0, 0, 0, // increment
+	}
+	_, err := NewFramer(nil, bytes.NewReader(frame)).ReadFrame()
+	if _, ok := err.(StreamError); !ok {
+		t.Fatalf("ReadFrame error = %T %v; want StreamError", err, err)
+	}
+	if terminalReadFrameError(err) {
+		t.Fatalf("terminalReadFrameError(%v) = true; want false", err)
+	}
+}
+
+type returningErrorReader struct {
+	err error
+}
+
+func (r returningErrorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 func TestTypeFrameParserHolePanic(t *testing.T) {

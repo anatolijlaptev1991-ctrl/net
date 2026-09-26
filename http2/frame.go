@@ -441,8 +441,35 @@ func (fc *frameCache) getDataFrame() *DataFrame {
 	return &fc.dataFrame
 }
 
+// framerReadError distinguishes an error returned by the Framer's underlying
+// reader from an error produced while parsing a frame of the current connection.
+// This prevents a reader-originated StreamError (e.g. a sticky error cached by
+// crypto/tls from a nested HTTP/2 transport) from being mistaken for a locally
+// parsed, recoverable StreamError, which would spin the read loop (golang/go#80567).
+type framerReadError struct {
+	err error
+}
+
+func (e framerReadError) Error() string { return e.err.Error() }
+func (e framerReadError) Unwrap() error { return e.err }
+
+type framerReader struct {
+	io.Reader
+}
+
+func (r framerReader) Read(p []byte) (n int, err error) {
+	n, err = r.Reader.Read(p)
+	if _, ok := err.(StreamError); ok {
+		err = framerReadError{err}
+	}
+	return n, err
+}
+
 // NewFramer returns a Framer that writes frames to w and reads them from r.
 func NewFramer(w io.Writer, r io.Reader) *Framer {
+	if r != nil {
+		r = framerReader{r}
+	}
 	fr := &Framer{
 		w:                 w,
 		r:                 r,
