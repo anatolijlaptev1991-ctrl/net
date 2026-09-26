@@ -1,0 +1,21 @@
+name: verify-http2-fix
+
+on:
+  push:
+    branches: [fix/http2-reader-streamerror]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Vet
+        run: go vet golang.org/x/net/http2
+      - name: Run regression tests
+        run: go test golang.org/x/net/http2 -run 'TestFramerWrapsReaderStreamError|TestFramerLeavesParsedStreamErrorUnwrapped' -v -count=1
+      - name: Run full http2 package tests
+        run: go test golang.org/x/net/http2 -count=1
